@@ -5,19 +5,46 @@ from requests.exceptions import HTTPError
 
 from elmo import query
 from elmo.api.client import ElmoClient
-from elmo.api.exceptions import LockNotAcquired, QueryNotValid
+from elmo.api.exceptions import (
+    LockNotAcquired,
+    QueryNotValid,
+    CredentialError,
+    InvalidToken,
+    CodeError,
+    InvalidSector,
+    LockError,
+)
+
+
+def test_client_constructor_default():
+    """Should build the client using the default values."""
+    client = ElmoClient()
+    assert client._router._base_url == "https://connect.elmospa.com"
+    assert client._domain is None
+    assert client._session_id is None
+
+
+def test_client_constructor_v03():
+    """Backward compatibility pre 0.4: the order of parameters must not change
+    otherwise a breaking change is introduced.
+    """
+    client = ElmoClient("https://example.com", "domain")
+    assert client._router._base_url == "https://example.com"
+    assert client._domain == "domain"
+    assert client._session_id is None
 
 
 def test_client_constructor():
-    """Should build the client using the base URL and the vendor suffix."""
-    client = ElmoClient("https://example.com", "vendor")
+    """Should build the client using the base URL and the domain suffix."""
+    client = ElmoClient(base_url="https://example.com", domain="domain")
     assert client._router._base_url == "https://example.com"
+    assert client._domain == "domain"
     assert client._session_id is None
 
 
 def test_client_constructor_with_session_id():
     """Should build the client with a provided `session_id`."""
-    client = ElmoClient("https://example.com", "vendor", session_id="test")
+    client = ElmoClient(session_id="test")
     assert client._session_id == "test"
 
 
@@ -27,7 +54,7 @@ def test_client_auth_success(server, client):
         {
             "SessionId": "00000000-0000-0000-0000-000000000000",
             "Username": "test",
-            "Domain": "vendor",
+            "Domain": "domain",
             "Language": "en",
             "IsActivated": true,
             "IsConnected": true,
@@ -56,11 +83,10 @@ def test_client_auth_forbidden(server, client):
         status=403,
     )
 
-    with pytest.raises(HTTPError) as excinfo:
+    with pytest.raises(CredentialError):
         client.auth("test", "test")
     assert client._session_id is None
     assert len(server.calls) == 1
-    assert "403 Client Error: Forbidden" in str(excinfo.value)
 
 
 def test_client_auth_unknown_error(server, client):
@@ -80,7 +106,7 @@ def test_client_auth_redirect(server, client):
     redirect = """
         {
             "SessionId": "00000000-0000-0000-0000-000000000000",
-            "Domain": "vendor",
+            "Domain": "domain",
             "Redirect": true,
             "RedirectTo": "https://redirect.example.com"
         }
@@ -89,7 +115,7 @@ def test_client_auth_redirect(server, client):
         {
             "SessionId": "99999999-9999-9999-9999-999999999999",
             "Username": "test",
-            "Domain": "vendor",
+            "Domain": "domain",
             "Language": "en",
             "IsActivated": true,
             "IsConnected": true,
@@ -120,7 +146,7 @@ def test_client_auth_infinite_redirect(server, client):
     redirect = """
         {
             "SessionId": "00000000-0000-0000-0000-000000000000",
-            "Domain": "vendor",
+            "Domain": "domain",
             "Redirect": true,
             "RedirectTo": "https://redirect.example.com"
         }
@@ -141,13 +167,168 @@ def test_client_auth_infinite_redirect(server, client):
     assert len(server.calls) == 2
 
 
+def test_client_auth_without_domain(server):
+    """Should authenticate without sending the domain field."""
+    html = """
+        {
+            "SessionId": "00000000-0000-0000-0000-000000000000",
+            "Redirect": false
+        }
+    """
+    client = ElmoClient(base_url="https://example.com")
+    server.add(responses.GET, "https://example.com/api/login", body=html, status=200)
+    client.auth("test", "test")
+    assert len(server.calls) == 1
+    assert "domain" not in server.calls[0].request.params
+
+
+def test_client_auth_with_domain(server):
+    """Should authenticate sending the domain field."""
+    html = """
+        {
+            "SessionId": "00000000-0000-0000-0000-000000000000",
+            "Redirect": false
+        }
+    """
+    client = ElmoClient(base_url="https://example.com", domain="domain")
+    server.add(responses.GET, "https://example.com/api/login", body=html, status=200)
+    client.auth("test", "test")
+    assert len(server.calls) == 1
+    assert server.calls[0].request.params["domain"] == "domain"
+
+
+def test_client_poll(server, client):
+    """Should leverage long-polling endpoint to grab the status."""
+    html = """
+        {
+            "ConnectionStatus": false,
+            "CanElevate": false,
+            "LoggedIn": false,
+            "LoginInProgress": false,
+            "Areas": false,
+            "Events": false,
+            "Inputs": false,
+            "Outputs": false,
+            "Anomalies": false,
+            "ReadStringsInProgress": false,
+            "ReadStringPercentage": 0,
+            "Strings": 0,
+            "ManagedAccounts": false,
+            "Temperature": false,
+            "StatusAdv": false,
+            "Images": false,
+            "AdditionalInfoSupported": true,
+            "HasChanges": false
+        }
+    """
+    server.add(responses.POST, "https://example.com/api/updates", body=html, status=200)
+    client._session_id = "test"
+
+    state = client.poll()
+    assert len(state.keys()) == 3
+    assert state["has_changes"] is False
+    assert state["inputs"] is False
+    assert state["areas"] is False
+
+
+def test_client_poll_with_changes(server, client):
+    """Should return a dict with updated states."""
+    html = """
+        {
+            "ConnectionStatus": false,
+            "CanElevate": false,
+            "LoggedIn": false,
+            "LoginInProgress": false,
+            "Areas": true,
+            "Events": false,
+            "Inputs": true,
+            "Outputs": false,
+            "Anomalies": false,
+            "ReadStringsInProgress": false,
+            "ReadStringPercentage": 0,
+            "Strings": 0,
+            "ManagedAccounts": false,
+            "Temperature": false,
+            "StatusAdv": false,
+            "Images": false,
+            "AdditionalInfoSupported": true,
+            "HasChanges": true
+        }
+    """
+    server.add(responses.POST, "https://example.com/api/updates", body=html, status=200)
+    client._session_id = "test"
+
+    state = client.poll()
+    assert len(state.keys()) == 3
+    assert state["has_changes"] is True
+    assert state["inputs"] is True
+    assert state["areas"] is True
+
+
+def test_client_poll_with_updated_ids(server, client):
+    """Should use internal IDs to make the call."""
+    html = """
+        {
+            "ConnectionStatus": false,
+            "CanElevate": false,
+            "LoggedIn": false,
+            "LoginInProgress": false,
+            "Areas": true,
+            "Events": false,
+            "Inputs": true,
+            "Outputs": false,
+            "Anomalies": false,
+            "ReadStringsInProgress": false,
+            "ReadStringPercentage": 0,
+            "Strings": 0,
+            "ManagedAccounts": false,
+            "Temperature": false,
+            "StatusAdv": false,
+            "Images": false,
+            "AdditionalInfoSupported": true,
+            "HasChanges": true
+        }
+    """
+    server.add(responses.POST, "https://example.com/api/updates", body=html, status=200)
+    client._session_id = "test"
+    client._latestEntryId = {
+        query.SECTORS: 42,
+        query.INPUTS: 4242,
+    }
+
+    client.poll()
+    assert len(server.calls) == 1
+    body = server.calls[0].request.body.split("&")
+    assert "sessionId=test" in body
+    assert "Areas=42" in body
+    assert "Inputs=4242" in body
+    assert "CanElevate=1" in body
+    assert "ConnectionStatus=1" in body
+
+
+def test_client_poll_unknown_error(server, client):
+    """Should raise an Exception for unknown status code."""
+    server.add(
+        responses.POST,
+        "https://example.com/api/updates",
+        body="Server Error",
+        status=500,
+    )
+
+    client._session_id = "test"
+
+    with pytest.raises(HTTPError):
+        client.poll()
+    assert len(server.calls) == 1
+
+
 def test_client_lock(server, client, mocker):
     """Should acquire a lock if credentials are properly provided."""
     html = """[
         {
             "Poller": {"Poller": 1, "Panel": 1},
             "CommandId": 5,
-            "Successful": True,
+            "Successful": true
         }
     ]"""
     server.add(
@@ -161,22 +342,34 @@ def test_client_lock(server, client, mocker):
     assert len(server.calls) == 1
 
 
-def test_client_lock_forbidden(server, client, mocker):
-    """Should raise an Exception if credentials are not correct."""
+def test_client_lock_wrong_code(server, client, mocker):
+    """Should raise a CodeError if inserted code is not correct."""
     html = """[
         {
             "Poller": {"Poller": 1, "Panel": 1},
             "CommandId": 5,
-            "Successful": False,
+            "Successful": false
         }
     ]"""
     server.add(
-        responses.POST, "https://example.com/api/panel/syncLogin", body=html, status=403
+        responses.POST, "https://example.com/api/panel/syncLogin", body=html, status=200
     )
     mocker.patch.object(client, "unlock")
     client._session_id = "test"
 
-    with pytest.raises(HTTPError):
+    with pytest.raises(CodeError):
+        with client.lock("test"):
+            pass
+    assert len(server.calls) == 1
+
+
+def test_client_lock_called_twice(server, client, mocker):
+    """Should raise a CodeError if Lock() is called twice."""
+    server.add(responses.POST, "https://example.com/api/panel/syncLogin", status=403)
+    mocker.patch.object(client, "unlock")
+    client._session_id = "test"
+
+    with pytest.raises(LockError):
         with client.lock("test"):
             pass
     assert len(server.calls) == 1
@@ -202,12 +395,43 @@ def test_client_lock_unknown_error(server, client, mocker):
 
 def test_client_lock_calls_unlock(server, client, mocker):
     """Should call unlock() when exiting from the context."""
-    server.add(responses.POST, "https://example.com/api/panel/syncLogin")
+    html = """[
+        {
+            "Poller": {"Poller": 1, "Panel": 1},
+            "CommandId": 5,
+            "Successful": true
+        }
+    ]"""
+    server.add(
+        responses.POST, "https://example.com/api/panel/syncLogin", body=html, status=200
+    )
     mocker.patch.object(client, "unlock")
     client._session_id = "test"
 
     with client.lock("test"):
         pass
+    assert client.unlock.called is True
+    assert len(server.calls) == 1
+
+
+def test_client_lock_and_unlock_with_exception(server, client, mocker):
+    """Should call unlock() even if an exception is raised in the block."""
+    html = """[
+        {
+            "Poller": {"Poller": 1, "Panel": 1},
+            "CommandId": 5,
+            "Successful": true
+        }
+    ]"""
+    server.add(
+        responses.POST, "https://example.com/api/panel/syncLogin", body=html, status=200
+    )
+    mocker.patch.object(client, "unlock")
+    client._session_id = "test"
+
+    with pytest.raises(Exception):
+        with client.lock("test"):
+            raise Exception
     assert client.unlock.called is True
     assert len(server.calls) == 1
 
@@ -218,7 +442,7 @@ def test_client_unlock(server, client):
         {
             "Poller": {"Poller": 1, "Panel": 1},
             "CommandId": 5,
-            "Successful": True,
+            "Successful": true
         }
     ]"""
     server.add(
@@ -251,7 +475,7 @@ def test_client_unlock_fails_forbidden(server, client):
         {
             "Poller": {"Poller": 1, "Panel": 1},
             "CommandId": 5,
-            "Successful": False,
+            "Successful": false
         }
     ]"""
     server.add(
@@ -264,9 +488,9 @@ def test_client_unlock_fails_forbidden(server, client):
     client._session_id = "test"
     client._lock.acquire()
 
-    with pytest.raises(HTTPError):
+    with pytest.raises(LockNotAcquired):
         client.unlock()
-    assert not client._lock.acquire(False)
+    assert not client._lock.locked()
     assert len(server.calls) == 1
 
 
@@ -276,7 +500,7 @@ def test_client_unlock_fails_unexpected_error(server, client):
         {
             "Poller": {"Poller": 1, "Panel": 1},
             "CommandId": 5,
-            "Successful": False,
+            "Successful": false
         }
     ]"""
     server.add(
@@ -300,7 +524,7 @@ def test_client_arm(server, client):
         {
             "Poller": {"Poller": 1, "Panel": 1},
             "CommandId": 5,
-            "Successful": True,
+            "Successful": true
         }
     ]"""
     server.add(
@@ -327,7 +551,7 @@ def test_client_arm_sectors(server, client):
         {
             "Poller": {"Poller": 1, "Panel": 1},
             "CommandId": 5,
-            "Successful": True,
+            "Successful": true
         }
     ]"""
     server.add(
@@ -365,25 +589,39 @@ def test_client_arm_fails_missing_lock(server, client):
 
 def test_client_arm_fails_missing_session(server, client):
     """Should fail if a wrong access token is used."""
+    server.add(
+        responses.POST,
+        "https://example.com/api/panel/syncSendCommand",
+        status=401,
+    )
+    client._session_id = "test"
+    client._lock.acquire()
+
+    with pytest.raises(InvalidToken):
+        client.arm()
+    assert len(server.calls) == 1
+
+
+def test_client_arm_fails_wrong_sector(server, client):
+    """Should fail if a not existing sector is used."""
     html = """[
         {
             "Poller": {"Poller": 1, "Panel": 1},
             "CommandId": 5,
-            "Successful": False,
+            "Successful": false
         }
     ]"""
     server.add(
         responses.POST,
         "https://example.com/api/panel/syncSendCommand",
         body=html,
-        status=403,
+        status=200,
     )
     client._session_id = "test"
     client._lock.acquire()
 
-    with pytest.raises(HTTPError):
-        client.arm()
-    assert len(server.calls) == 1
+    with pytest.raises(InvalidSector):
+        assert client.arm([200])
 
 
 def test_client_arm_fails_unknown_error(server, client):
@@ -408,7 +646,7 @@ def test_client_disarm(server, client):
         {
             "Poller": {"Poller": 1, "Panel": 1},
             "CommandId": 5,
-            "Successful": True,
+            "Successful": true
         }
     ]"""
     server.add(
@@ -435,7 +673,7 @@ def test_client_disarm_sectors(server, client):
         {
             "Poller": {"Poller": 1, "Panel": 1},
             "CommandId": 5,
-            "Successful": True,
+            "Successful": true
         }
     ]"""
     server.add(
@@ -473,25 +711,39 @@ def test_client_disarm_fails_missing_lock(server, client):
 
 def test_client_disarm_fails_missing_session(server, client):
     """Should fail if a wrong access token is used."""
+    server.add(
+        responses.POST,
+        "https://example.com/api/panel/syncSendCommand",
+        status=401,
+    )
+    client._session_id = "test"
+    client._lock.acquire()
+
+    with pytest.raises(InvalidToken):
+        client.disarm()
+    assert len(server.calls) == 1
+
+
+def test_client_disarm_fails_wrong_sector(server, client):
+    """Should fail if a not existing sector is used."""
     html = """[
         {
             "Poller": {"Poller": 1, "Panel": 1},
             "CommandId": 5,
-            "Successful": False,
+            "Successful": false
         }
     ]"""
     server.add(
         responses.POST,
         "https://example.com/api/panel/syncSendCommand",
         body=html,
-        status=403,
+        status=200,
     )
     client._session_id = "test"
     client._lock.acquire()
 
-    with pytest.raises(HTTPError):
-        client.disarm()
-    assert len(server.calls) == 1
+    with pytest.raises(InvalidSector):
+        assert client.disarm([200])
 
 
 def test_client_disarm_fails_unknown_error(server, client):
@@ -794,6 +1046,8 @@ def test_client_get_sectors_status(server, client, sectors_json, mocker):
     assert sectors_disarmed == [
         {"element": 3, "id": 3, "index": 2, "name": "Kitchen"},
     ]
+    # Element 4 is filtered out but the query must store that value
+    assert client._latestEntryId[query.SECTORS] == 4
 
 
 def test_client_get_inputs(server, client, inputs_json, mocker):
@@ -818,6 +1072,8 @@ def test_client_get_inputs(server, client, inputs_json, mocker):
     assert inputs_wait == [
         {"element": 3, "id": 3, "index": 2, "name": "Door entryway"},
     ]
+    # Element 4 is filtered out but the query must store that value
+    assert client._latestEntryId[query.INPUTS] == 4
 
 
 def test_client_query_not_valid(client):
@@ -844,7 +1100,10 @@ def test_client_query_unauthorized(server, client, mocker):
 def test_client_query_error(server, client, mocker):
     """Should raise HTTPError if there is a client error."""
     server.add(
-        responses.POST, "https://example.com/api/areas", body="Bad Request", status=400,
+        responses.POST,
+        "https://example.com/api/areas",
+        body="Bad Request",
+        status=400,
     )
     client._session_id = "test"
     mocker.patch.object(client, "_get_descriptions")

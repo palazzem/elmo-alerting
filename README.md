@@ -14,7 +14,7 @@ Through a generic configuration, the client allows:
 
 ## Requirements
 
-* Python 3.5+
+* Python 3.6+
 * `requests`
 
 ## Getting Started
@@ -31,9 +31,9 @@ $ pip install econnect-python
 from elmo import query
 from elmo.api.client import ElmoClient
 
-# Initialize the client with an API endpoint and a vendor and
-# authenticate your connection to retrieve the access token
-client = ElmoClient("https://example.com", "vendor")
+# Initialize a new client to authenticate your connection
+# and retrieve an access token used for the entire session.
+client = ElmoClient()
 client.auth("username", "password")
 
 # To arm/disarm the system you must gain the exclusive Lock()
@@ -59,13 +59,31 @@ status = client.check()
 # }
 ```
 
-The access token is valid for 10 minutes after that you need to authenticate again to
-refresh the token. Obtaining the lock via `client.lock("code")` is mandatory to arm or
-disarm the alert, otherwise the API returns `403`.
+The access token is valid for 10 minutes, after which, you need to authenticate again to
+refresh the token. Obtaining the lock via `client.lock("secret-code")` is mandatory to arm or
+disarm the system, otherwise the API returns `403`. `secret-code` is the numeric code you
+use to arm/disarm the system from the alarm panel.
 
 Once the lock is obtained, other clients cannot connect to the alarm system and only a
 manual override on the terminal is allowed. Outside the context manager, the lock is
 automatically released.
+
+### Client Configuration
+
+If `https://connect.elmospa.com` is your authentication page, no configuration is needed
+and you can skip this section.
+
+On the other hand, if your authentication page is something similar to
+`https://connect3.elmospa.com/nwd`, you must configure your client as follows:
+
+```python
+# Override the default URL and domain
+client = ElmoClient(base_url="https://connect3.elmospa.com", domain="nwd")
+client.auth("username", "password")
+```
+
+If your `base_url` or `domain` are not properly set, your credentials will not work
+and you will get a `403 Client Error` as your username and password are wrong.
 
 ## Development
 

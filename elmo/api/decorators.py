@@ -1,4 +1,6 @@
-from .exceptions import PermissionDenied, LockNotAcquired
+from requests.exceptions import HTTPError
+
+from .exceptions import MissingToken, InvalidToken, LockNotAcquired
 
 
 def require_session(func):
@@ -7,15 +9,23 @@ def require_session(func):
     `_session_id`.
 
     Raises:
-        InvalidSession: if a `session_id` is not available or expired.
+        MissingToken: if a `session_id` is not available.
+        InvalidToken: if stored `session_id` is not valid (returns 401).
     """
 
     def func_wrapper(*args, **kwargs):
         self = args[0]
         if self._session_id is None:
-            raise PermissionDenied("You do not have permission to perform this action.")
+            raise MissingToken
         else:
-            return func(*args, **kwargs)
+            try:
+                return func(*args, **kwargs)
+            except HTTPError as e:
+                # Translate 401 into InvalidToken exception
+                # Bubble up any other exception
+                if e.response.status_code == 401:
+                    raise InvalidToken
+                raise e
 
     return func_wrapper
 
@@ -33,10 +43,20 @@ def require_lock(func):
         self = args[0]
         # If the Lock() acquisition succeed it means a locking is not occurring
         # and so bail-out the execution (and release the lock).
-        if self._lock.acquire(False):
-            self._lock.release()
+        # TODO: Lock() state must be moved outside of this client, so that
+        # it represents a stateless client.
+        if not self._lock.locked():
             raise LockNotAcquired("A lock must be acquired via `lock()` method.")
         else:
-            return func(*args, **kwargs)
+            try:
+                return func(*args, **kwargs)
+            except HTTPError as err:
+                # 403: Method has been called without obtaining the server lock
+                if err.response.status_code == 403:
+                    self._lock.release()
+                    raise LockNotAcquired(
+                        "A lock must be acquired via `lock()` method."
+                    )
+                raise err
 
     return func_wrapper

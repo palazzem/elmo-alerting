@@ -10,6 +10,12 @@ class BaseException(Exception):
         return str(self.message)
 
 
+class ValidationError(BaseException):
+    """Exception raised when a Validator fails."""
+
+    default_message = "Client configuration is invalid."
+
+
 class QueryNotValid(BaseException):
     """Exception raised when a Query is not valid."""
 
@@ -22,13 +28,43 @@ class APIException(BaseException):
     default_message = "A server error occurred"
 
 
-class PermissionDenied(APIException):
-    """Exception raised when a user doesn't have permission to perform this action."""
+class CredentialError(APIException):
+    """Exception raised when used credentials are not correct."""
 
-    default_message = "You do not have permission to perform this action"
+    default_message = "Username or password are not correct"
 
 
-class LockNotAcquired(Exception):
+class MissingToken(APIException):
+    """Exception raised when a client is used without prior authentication."""
+
+    default_message = "No token is present. You must authenticate to use the client."
+
+
+class InvalidToken(APIException):
+    """Exception raised when a previously valid token is not valid anymore."""
+
+    default_message = "Used token is not valid. You must authenticate again."
+
+
+class LockNotAcquired(BaseException):
     """Exception raised when a Lock() is required to run the function."""
 
     default_message = "System lock not acquired"
+
+
+class LockError(APIException):
+    """Exception raised when it's not possible to obtain the Lock()."""
+
+    default_message = "Unable to obtain the Lock()."
+
+
+class CodeError(APIException):
+    """Exception raised when used panel code is not correct."""
+
+    default_message = "Digited panel code is not correct"
+
+
+class InvalidSector(APIException):
+    """Exception raised when armed/disarmed sector doesn't exist."""
+
+    default_message = "Selected sector doesn't exist."
